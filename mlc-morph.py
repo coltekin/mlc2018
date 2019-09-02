@@ -7,6 +7,8 @@ import os.path
 from collections import Counter
 import argparse
 import numpy as np
+from multiprocessing import Pool
+from mlc_data import read_pbc
 
 from conllu import conllu_sentences
 
@@ -75,21 +77,25 @@ def sample(nodes, n, pos_bl=['NUM', 'PUNCT'], pos_wl=[]):
 
 def parse_cmdline(args):
     ap = argparse.ArgumentParser()
+    ap.add_argument('files', metavar='source_file', nargs='+')
+    ap.add_argument('-j', '--nproc', default=1, type=int, help='number of processes')
     ap.add_argument('-s', '--samples', default=10, type=int, help='number of samples')
     ap.add_argument('-S', '--sample-size', default=1000, type=int)
     ap.add_argument('--separator', default='\t')
-    ap.add_argument('files', metavar='CoNLL-U file', nargs='+')
+    ap.add_argument('-c', '--corpus-type', default='UD')
     opt = ap.parse_args()
     return opt
 
 
 opt = parse_cmdline(sys.argv)
 
-head = True
-for fname in opt.files:
+def score_file(fname, ctype='UD'):
     nodes = []
-    for sent in conllu_sentences(fname):
-        nodes.extend(sent.nodes[1:])
+    if ctype == 'UD':
+        for sent in conllu_sentences(fname):
+            nodes.extend(sent.nodes[1:])
+    else: # PBC
+        nodes = read_pbc(fname)
 
     ttr = []
     msp = []
@@ -103,26 +109,44 @@ for fname in opt.files:
     for _ in range(opt.samples):
         smpl = sample(nodes, opt.sample_size)
         ttr.append(get_ttr(smpl))
-        msp.append(get_msp(smpl))
-        pe, pc, fe, fc = get_feat_entropy(smpl)
-        pos_ent.append(pe)
-        pos_count.append(pc)
-        feat_ent.append(fe)
-        feat_count.append(fc)
-        form_feat, feat_form = get_cond_entropy(smpl)
-        cent_form_feat.append(form_feat)
-        cent_feat_form.append(feat_form)
+        if ctype == 'UD':
+            msp.append(get_msp(smpl))
+            pe, pc, fe, fc = get_feat_entropy(smpl)
+            pos_ent.append(pe)
+            pos_count.append(pc)
+            feat_ent.append(fe)
+            feat_count.append(fc)
+            form_feat, feat_form = get_cond_entropy(smpl)
+            cent_form_feat.append(form_feat)
+            cent_feat_form.append(feat_form)
+    if ctype != 'UD':
+        msp = pe = pc = fe = fc = pos_ent = pos_count =\
+        feat_ent = feat_count = form_feat = feat_form =\
+        cent_form_feat = cent_feat_form = [0.0] * len(ttr)
 
-    fmt = "{}" + "{}{{}}".format(opt.separator) *16
-    if head:
-        print("# sample_size = {}, samples = {}".format(
-            opt.sample_size, opt.samples))
-        print(fmt.format('fname', 'ttr', 'ttr_sd', 'msp', 'msp_sd',
-            'pos_ent', 'pos_ent_sd', 'pos_types', 'pos_types_sd',
-            'feat_ent', 'feat_ent_sd', 'feat_types', 'feat_types_sd',
-            'cent_form_feat', 'cent_form_feat_sd',
-            'cent_feat_form', 'cent_feat_form_sd'))
-        head = False
+    return fname, (ttr, msp, pe, pc, fe, fc, pos_ent, pos_count, feat_ent,
+            feat_count, form_feat, feat_form, cent_form_feat, cent_feat_form)
+
+def score_pbc(fname):
+    return score_file(fname, ctype='pbc')
+
+score_func = score_file
+if opt.corpus_type == 'pbc':
+    score_func = score_pbc
+
+pool = Pool(processes=opt.nproc)
+res = pool.map(score_func, opt.files)
+
+fmt = "{}" + "{}{{}}".format(opt.separator) *16
+print("# sample_size = {}, samples = {}".format(
+    opt.sample_size, opt.samples))
+print(fmt.format('fname', 'ttr', 'ttr_sd', 'msp', 'msp_sd',
+    'pos_ent', 'pos_ent_sd', 'pos_types', 'pos_types_sd',
+    'feat_ent', 'feat_ent_sd', 'feat_types', 'feat_types_sd',
+    'cent_form_feat', 'cent_form_feat_sd',
+    'cent_feat_form', 'cent_feat_form_sd'), flush=True)
+
+for fname, (ttr, msp, pe, pc, fe, fc, pos_ent, pos_count, feat_ent, feat_count, form_feat, feat_form, cent_form_feat, cent_feat_form) in res:
     print(fmt.format(os.path.basename(fname).replace('.conllu', ''),
                      np.mean(ttr), np.std(ttr),
                      np.mean(msp), np.std(msp),
@@ -131,4 +155,5 @@ for fname in opt.files:
                      np.mean(feat_ent), np.std(feat_ent),
                      np.mean(feat_count), np.std(feat_count),
                      np.mean(cent_form_feat), np.std(cent_form_feat), 
-                     np.mean(cent_feat_form), np.std(cent_feat_form)))
+                     np.mean(cent_feat_form), np.std(cent_feat_form)),
+                     flush=True)
