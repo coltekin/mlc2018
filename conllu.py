@@ -7,7 +7,6 @@ import sys
 """
 
 class Node(object):
-    # TODO: make this immutable?
     """ Holds a node (a word) in a dependency tree
         
         Except last three, the attributes correspond to CoNLL-U
@@ -32,16 +31,16 @@ class Node(object):
                  misc=None, children=[], multi=0, empty=0):
         self.index=int(index)
         self.form=form
-        self.lemma=(None if lemma is None or 
+        self.lemma=(None if not lemma or 
                         (lemma == '_' and upos != 'PUNCT')
                     else lemma)
         self.upos=upos
-        self.xpos=None if xpos is None or xpos == '_' else xpos
-        self.feats=None if feats is None or feats == '_' else feats
-        self.head=None if head is None or head == '_' else int(head)
+        self.xpos=None if not xpos or xpos == '_' else xpos
+        self.feats=None if not feats or feats == '_' else feats
+        self.head=None if not head or head == '_' else int(head)
         self.deprel=deprel
-        self.deps=None if deps is None or deps == '_' else deps
-        self.misc=None if misc is None or misc == '_' else misc
+        self.deps=None if not deps or deps == '_' else deps
+        self.misc=None if not misc or misc == '_' else misc
         self.children=children
         self.multi = int(multi)
         self.empty = int(empty)
@@ -52,13 +51,44 @@ class Node(object):
         if '-' in columns[0]:
             begin, end = columns[0].split('-')
             return cls(index=begin, form=columns[1], 
-                    misc=columns[8], multi=end)
+                    misc=columns[9], multi=end)
         elif '.' in columns[0]:
             empty_id = columns[0].split('.')
             part1, part2 = columns[0].split('.')
             return cls(part1, *columns[1:], empty=part2)
         else:
             return cls(*columns)
+
+    def _add_feat(self, f, v, s):
+        fvstr = '='.join((f, v))
+        if not s or s == '_':
+            return fvstr
+        else:
+            fv = s.split('|')
+            fv.append(fvstr)
+            return '|'.join(sorted(set(fv), key=lambda s: s.lower()))
+
+    def add_feat(self, feat, val):
+        self.feats = self._add_feat(feat, val, self.feats)
+
+    def add_misc(self, feat, val):
+        self.misc = self._add_feat(feat, val, self.misc)
+
+    def _del_feat(self, s, f, v=None):
+        fv = [x.split('=') for x in  s.split('|')]
+        if v:
+            fv = [(x, y) for x,y in fv if (x, y) != (f, v)]
+        else:
+            fv = [(x, y) for x,y in fv if x != f]
+        return "|".join(["=".join((x,y)) for x,y in fv]) or None
+
+    def del_feat(self, feat, val=None):
+        if self.feats is not None and self.feats != '_':
+            self.feats = self._del_feat(self.feats, feat, val)
+
+    def del_misc(self, feat, val=None):
+        if self.misc is not None and self.misc != '_':
+            self.misc = self._del_feat(self.misc, feat, val)
 
     def __str__(self):
         fields = [str(getattr(self, x)) for x in self.__slots__[1:10]]
@@ -71,13 +101,26 @@ class Node(object):
                         .replace('None', '_')
                         .replace('[]', '_'))
 
+    def _get_feat(self, fstr, feat):
+        if fstr:
+            for f , v in (fv.split('=') for fv in fstr.split('|')):
+                if f == feat:
+                    return v
+        return None
+
+    def get_feat(self, feat):
+        return self._get_feat(self.feats, feat)
+
+    def get_misc(self, feat):
+        return self._get_feat(self.misc, feat)
+
 class Sentence(object):
     """ Holds a CoNLL-U sentence.
         Attributes:
             nodes   - nodes of the primary tree
             multi   - dictionary of multi-word tokens indexed by
-                      beginning of the range, value is a singel
-                      node with 'multi' attribute to the final
+                      beginning of the range, value is a single
+                      node with 'multi' attribute to the final index
             empty   - dictionary of empty tokens indexed by the
                       previous token index, value is a list.
             comment - the pre-sentence comments
@@ -129,7 +172,7 @@ class Sentence(object):
 
     def __str__(self):
         s = "\n".join(self.comment) + "\n"
-        for i in range(1, len(self)):
+        for i in range(1, len(self) + 1):
             if i in self.multi:
                 s += str(self.multi[i]) + "\n"
             s += str(self.nodes[i]) + "\n"
@@ -138,41 +181,11 @@ class Sentence(object):
                     s += str(e) + "\n"
         return s
 
-    def upos(self, index=None):
-        """Return the upos for the indexed node
-           or a list of all upos tags. """
-        if index:
-            return self.nodes[0].upos
-        else:
-            return [x.upos for x in self.nodes]
-
-    def pos(self, index=None):
-        """Alternative spelling"""
-        return self.upos(index)
-
-    def feats(self, index=None):
-        if index:
-            return self.nodes[0].feats
-        else:
-            return [x.feats for x in self.nodes]
-
-    def xpos(self, index=None):
-        if index:
-            return self.nodes[0].xpos
-        else:
-            return [x.xpos for x in self.nodes]
-
-    def lemma(self, index=None):
-        if index:
-            return self.nodes[0].lemma
-        else:
-            return [x.lemma for x in self.nodes]
-
     def form(self, index=None):
         if index:
-            return self.nodes[0].form
+            return self.nodes[index].form
         else:
-            return [x.form for x in self.nodes]
+            return [x.form for x in self.nodes[1:]]
 
     def tokens(self):
         tokens = [node.form for node in self.nodes]
@@ -182,31 +195,155 @@ class Sentence(object):
                 tokens[i] = None
         return [x for x in tokens if x is not None]
 
+    def text(self):
+        tokens = []
+        last_tok = len(self.nodes) - 2
+        for i, node in enumerate(self.nodes[1:]):
+            if (node.misc and 'SpaceAfter=No' in node.misc) or \
+                    (i == last_tok):
+                tokens.append(node.form)
+            else:
+                tokens.append(node.form + " ")
+        for node in self.multi.values():
+            if node.misc and 'SpaceAfter=No' in node.misc:
+                tokens[node.index - 1] = node.form
+            else:
+                tokens[node.index - 1] = node.form + " "
+            for i in range(node.index, node.multi):
+                tokens[i] = None
+        return ''.join([x for x in tokens if x is not None])
+
+    def upos(self, index=None):
+        """Return the upos for the indexed node
+           or a list of all upos tags. """
+        if index:
+            return self.nodes[index].upos
+        else:
+            return [x.upos for x in self.nodes[1:]]
+
+    def lemma(self, index=None):
+        if index:
+            return self.nodes[index].lemma
+        else:
+            return [x.lemma for x in self.nodes[1:]]
+
+    def pos(self, index=None):
+        """Alternative spelling"""
+        return self.upos(index)
+
+    def xpos(self, index=None):
+        if index:
+            return self.nodes[index].xpos
+        else:
+            return [x.xpos for x in self.nodes[1:]]
+
+    def feats(self, index=None):
+        if index:
+            return self.nodes[index].feats
+        else:
+            return [x.feats for x in self.nodes[1:]]
 
     def deprel(self, index=None):
         if index:
-            return self.nodes[0].deprel
+            return self.nodes[index].deprel
         else:
-            return [x.form for x in self.deprel]
+            return [x.deprel for x in self.nodes[1:]]
 
     def head(self, index=None):
         if index:
-            return self.nodes[0].head
+            return self.nodes[index].head
         else:
-            return [x.form for x in self.head]
+            return [x.head for x in self.nodes[1:]]
 
-def conllu_sentences(filename):
-    with open(filename, 'r') as fp:
-        sent = Sentence(stream=fp)
+    def misc(self, index=None):
+        if index:
+            return self.nodes[index].misc
+        else:
+            return [x.misc for x in self.nodes[1:]]
+
+    def delete_node(self, index, attach_children=None):
+        assert 0 < index <= len(self)
+        if attach_children is None:
+            attach_children = self.nodes[index].head
+        if attach_children > index:
+            attach_children -= 1
+        for multi_start in sorted(self.multi):
+            multi_node = self.multi[multi_start]
+            multi_end = multi_node.multi
+            if index == multi_start:
+                del self.multi[multi_start]
+                multi_start += 1
+                if multi_end > multi_start:
+                    multi_node.multi -= 1
+                    multi_node.index -= multi_start
+                    self.multi[multi_start] = muti_node
+            elif index == multi_end:
+                multi_end -= 1
+                if multi_end > multi_start:
+                    multi_node.multi = multi_end
+                else:
+                    del self.multi[multi_start]
+            elif multi_start < index < multi_end:
+                multi_node.multi -= 1
+            elif multi_start > index:
+                del self.multi[multi_start]
+                multi_node.multi -= 1
+                self.multi[multi_start - 1] = multi_node
+        del self.nodes[index]
+        for i, node in enumerate(self.nodes[1:]):
+            if node.index > index:
+                node.index -= 1
+            if node.head == index:
+                node.head = attach_children
+            if node.head > index:
+                node.head -= 1
+        for i in sorted(self.empty):
+            e_nodes = self.empty[i]
+            if i >= index:
+                self.empty[i-1] = e_nodes
+                del self.empty[i]
+
+    def children_of(self, node):
+        for i in range(1, len(self) + 1):
+            if self.nodes[i].head == node.index:
+                yield self.nodes[i]
+
+    def get_multi(self, node):
+        for multi_start in sorted(self.multi):
+            multi_node = self.multi[multi_start]
+            multi_end = multi_node.multi
+            if node.index < multi_start:
+                return None
+            elif multi_start <= node.index <= multi_end:
+                return multi_node
+        return None
+
+def conllu_sentences(f):
+    if isinstance(f, str):
+        fp = open(f, 'r')
+    else: # assume it is a file-like object
+        fp = f
+    sent = Sentence(stream=fp)
+    while sent:
         yield sent
-        while sent:
-            sent = Sentence(stream=fp)
-            yield sent
+        sent = Sentence(stream=fp)
+    if isinstance(f, str): # close only if we opened it
+        fp.close()
 
 
 if '__main__' == __name__:
 
     sentences = conllu_sentences(sys.argv[1])
+    sent = next(sentences)
+#    print(sent)
+#    print("---------")
+#    sent.delete_node(5, attach_children=0)
+#    print(sent)
     for sent in sentences:
-        if sent:
-            print(sent)
+        for node in sent.nodes:
+            multi = sent.get_multi(node)
+            if multi:
+                print(multi.form, node.form)
+#        print("---------")
+#        print(sent)
+#        print("---------")
